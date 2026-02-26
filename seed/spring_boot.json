@@ -1,0 +1,17 @@
+{
+  "domain_name": "spring_boot",
+  "typical_flow": [
+    "SpringApplication", "Configuration", "Component", "Service",
+    "Repository", "Controller", "RestController", "ExceptionHandler",
+    "ApplicationProperties", "Profiles", "Actuator"
+  ],
+  "common_gaps": [
+    "application.yml configuration", "dependency injection style",
+    "exception handling strategy", "profile configuration", "actuator endpoints"
+  ],
+  "common_contradictions": [
+    ["@Autowired field", "constructor injection"],
+    ["XML configuration", "Java configuration"],
+    ["@Component", "@Service for service layer"]
+  ]
+}

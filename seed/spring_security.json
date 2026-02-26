@@ -1,0 +1,18 @@
+{
+  "domain_name": "spring_security",
+  "typical_flow": [
+    "SecurityFilterChain", "UserDetailsService", "PasswordEncoder",
+    "BCryptPasswordEncoder", "JwtUtil", "JwtAuthenticationFilter",
+    "AuthenticationManager", "UserDetails", "GrantedAuthority",
+    "Role", "CORS", "CSRF"
+  ],
+  "common_gaps": [
+    "token refresh strategy", "token blacklisting",
+    "CORS configuration", "role hierarchy", "method security"
+  ],
+  "common_contradictions": [
+    ["session-based auth", "JWT stateless"],
+    ["HTTP basic", "JWT"],
+    ["permitAll", "authenticated on same endpoint"]
+  ]
+}

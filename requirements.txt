@@ -1,0 +1,9 @@
+llama-cpp-python==0.2.90
+networkx==3.3
+spacy==3.7.4
+redis==5.0.7
+numpy==1.26.4
+python-dotenv==1.0.1
+rich==13.7.1
+pytest==8.2.0
+matplotlib==3.9.0

@@ -1,0 +1,120 @@
+[
+  {
+    "number": 1,
+    "input": "We're building a Spring Boot 3.2 application. Database: PostgreSQL. We need a DAO layer for a User entity. Fields: id (Long), email (String), name (String), createdAt (LocalDateTime). Use NamedParameterJdbcTemplate. Use constructor injection throughout.",
+    "quality_config": {
+      "required_keywords": {
+        "NamedParameterJdbcTemplate": 1,
+        "User": 1,
+        "email": 0.5,
+        "RowMapper": 1,
+        "private final": 0.5
+      }
+    }
+  },
+  {
+    "number": 2,
+    "input": "Add a method to find user by email. Return Optional<User>.",
+    "quality_config": {
+      "required_keywords": {
+        "Optional": 2,
+        "findByEmail": 1,
+        "email": 0.5
+      }
+    }
+  },
+  {
+    "number": 3,
+    "input": "Add findAll with pagination support. Use offset and limit parameters.",
+    "quality_config": {
+      "required_keywords": {
+        "findAll": 1,
+        "offset": 1,
+        "limit": 1,
+        "List": 0.5
+      }
+    }
+  },
+  {
+    "number": 4,
+    "input": "Now add the UserService layer. It should use the UserDao we just built. Use constructor injection.",
+    "quality_config": {
+      "required_keywords": {
+        "UserService": 1,
+        "@Service": 1,
+        "UserDao": 1,
+        "private final": 0.5
+      }
+    }
+  },
+  {
+    "number": 5,
+    "input": "Add transaction management to the service. Use @Transactional appropriately — read-only on queries, writable on mutations.",
+    "quality_config": {
+      "required_keywords": {
+        "@Transactional": 2,
+        "readOnly": 1,
+        "true": 0.5
+      }
+    }
+  },
+  {
+    "number": 6,
+    "input": "The service needs to handle the case where a user with that email already exists. Throw a custom exception.",
+    "quality_config": {
+      "required_keywords": {
+        "throw": 1,
+        "Exception": 1,
+        "email": 0.5,
+        "exists": 0.5
+      }
+    }
+  },
+  {
+    "number": 7,
+    "input": "Create the custom exception classes we need — one for duplicate email, one for user not found.",
+    "quality_config": {
+      "required_keywords": {
+        "extends RuntimeException": 2,
+        "super": 1,
+        "message": 0.5
+      }
+    }
+  },
+  {
+    "number": 8,
+    "input": "Add a UserController with REST endpoints — GET /users/{id}, POST /users, GET /users.",
+    "quality_config": {
+      "required_keywords": {
+        "@RestController": 1,
+        "@RequestMapping": 1,
+        "ResponseEntity": 1,
+        "@GetMapping": 0.5,
+        "@PostMapping": 0.5
+      }
+    }
+  },
+  {
+    "number": 9,
+    "input": "Add Bean Validation to the POST /users request body. Validate email format and name not blank.",
+    "quality_config": {
+      "required_keywords": {
+        "@Valid": 2,
+        "@NotBlank": 1,
+        "@Email": 1
+      }
+    }
+  },
+  {
+    "number": 10,
+    "input": "Add a GlobalExceptionHandler that handles our two custom exceptions and Bean Validation errors, returning appropriate HTTP status codes.",
+    "quality_config": {
+      "required_keywords": {
+        "@ControllerAdvice": 2,
+        "@ExceptionHandler": 1,
+        "ResponseEntity": 1,
+        "HttpStatus": 1
+      }
+    }
+  }
+]

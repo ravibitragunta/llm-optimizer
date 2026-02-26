@@ -1,0 +1,26 @@
+{
+  "domain_name": "spring_jdbc",
+  "trigger_concepts": [
+    "NamedParameterJdbcTemplate", "JdbcTemplate",
+    "RowMapper", "SqlParameterSource", "DataSource",
+    "DAO", "JDBC", "ResultSet"
+  ],
+  "typical_flow": [
+    "DataSource", "NamedParameterJdbcTemplate", "RowMapper",
+    "BeanPropertyRowMapper", "SqlParameterSource", "MapSqlParameterSource",
+    "Repository", "Transaction", "TransactionManager",
+    "ExceptionHandling", "ConnectionPool", "HikariCP"
+  ],
+  "common_gaps": [
+    "error handling", "transaction boundaries",
+    "connection pool configuration", "database schema",
+    "SQL indices", "Flyway migration"
+  ],
+  "common_contradictions": [
+    ["JdbcTemplate", "NamedParameterJdbcTemplate"],
+    ["setter injection", "constructor injection"],
+    ["@Autowired field", "constructor injection"],
+    ["ResultSet manual mapping", "BeanPropertyRowMapper"],
+    ["Optional absent", "null return"]
+  ]
+}
