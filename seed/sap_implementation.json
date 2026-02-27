@@ -1,0 +1,20 @@
+{
+  "domain_name": "sap_implementation",
+  "trigger_concepts": [
+    "FI", "CO", "MM", "SD", "S4HANA", "ECC", "BAPI", "BADI", "LSMW", "transport"
+  ],
+  "typical_flow": [
+    "Blueprint Phase: Gather requirements",
+    "Realization Phase: Configure IMG, develop ABAP enhancements",
+    "Testing Phase: SIT and UAT execution",
+    "Go-Live & Support: Cutover, hypercare"
+  ],
+  "common_gaps": [
+    "No explicit mention of transport management strategy",
+    "Roles and authorizations (PFCG) not defined for custom tables",
+    "Data migration strategy missing for legacy records"
+  ],
+  "common_contradictions": [
+    ["Direct table update", "BAPI use recommended"]
+  ]
+}
