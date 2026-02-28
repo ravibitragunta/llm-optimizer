@@ -33,6 +33,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          brain/brain.py  (Brain.think)                  │
+│  Cloud-only mode: self.llm = None  |  All inference → Cloudflare Workers│
 │                                                                         │
 │  User Input                                                             │
 │      │                                                                  │
@@ -48,29 +49,35 @@
 │      │ graph_summary                                 ▼                  │
 │      │                                  ┌─────────────────────────┐    │
 │      │                                  │  retriever.py           │    │
-│      │                                  │  Retriever              │    │
 │      │                                  │  - Jaccard similarity   │    │
 │      │                                  │  - Redis pattern store  │    │
 │      │                                  │  - gap/contradiction     │    │
-│      │                                  │    detection            │    │
 │      │                                  └────────────┬────────────┘    │
 │      │                                               │ retrieved_data  │
 │      ▼                                               ▼                  │
 │  ┌──────────────────────────────────────────────────────────────────┐  │
 │  │  prompt.py  —  PromptBuilder.build()                             │  │
 │  │                                                                  │  │
-│  │  System Prompt → Session Context → Established Decisions         │  │
-│  │  → Current Request → Active Graph Context → Gaps/Contradictions  │  │
-│  │  → Recent History                                                │  │
+│  │  ── PROTECTED (never truncated) ──────────────────────────────   │  │
+│  │  Session Header → Universal Adaptive Block → Decisions           │  │
+│  │  → Compressed History (~15 tok/turn) → Current Request          │  │
+│  │                                                                  │  │
+│  │  ── OPTIONAL (trimmed if budget exhausted) ────────────────────  │  │
+│  │  Active Graph Context → Gaps / Contradictions                   │  │
 │  │                         ┌───────────────────────────────┐        │  │
-│  │                         │ Total budget: MAX_PROMPT_TOKENS│        │  │
-│  │                         │ Sections cut in priority order│        │  │
+│  │                         │ Budget: get_token_budget(domain)│       │  │
+│  │                         │ Default 2800, java/python 3500 │        │  │
 │  │                         └───────────────────────────────┘        │  │
 │  └─────────────────────────┬────────────────────────────────────────┘  │
-│                             │ bounded prompt                            │
+│                             │ bounded prompt (ChatML format)            │
 │                             ▼                                           │
-│                     Llama (llama-cpp-python)                            │
-│                     n_batch=512, use_mlock, use_mmap                    │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  clients/cloud_client.py  —  CloudClient                         │  │
+│  │  _cloudflare_coding()  →  POST https://qwen-coder-worker...      │  │
+│  │  Request: {"model": "qwen-2.5-coder-32b", "prompt": "<ChatML>"} │  │
+│  │  Response key: "text"                                            │  │
+│  │  summarize_history()  every 5 turns  →  same worker              │  │
+│  └─────────────────────────┬────────────────────────────────────────┘  │
 │                             │ response_text                             │
 │                             ▼                                           │
 │  ┌──────────────────────────────────────────────┐                      │
@@ -87,45 +94,62 @@
 ```
 think(user_input)
 │
+├── 0a. plugin_registry.detect(user_input) → plugin
+│         Identifies domain plugin: java_spring / sap / general
+│
+├── 0b. Every 5 turns: cloud_client.summarize_history()
+│         POST to Cloudflare Worker with JSON extraction prompt
+│         Injects decisions/facts/contradictions into graph
+│         ⚠ Currently returns truncated JSON — caught gracefully
+│
 ├── 1. graph.ingest(user_input, turn_N)
 │         Extract entities via regex + spaCy + keyword lists
 │         Find/create nodes in nx.DiGraph
 │         Increment node.darkness on each mention
-│         Detect relationships, create edges
+│         Detect relationships, create co-occurrence edges
 │         Return: active_node_ids[]
 │
 ├── 2. graph.decay(turn_N)
-│         For every node: darkness *= DARKNESS_DECAY
-│         Prune nodes below DARKNESS_THRESHOLD
+│         For every node: darkness *= DARKNESS_DECAY (0.95)
+│         Decisions: clamped at min 0.5 (never fade completely)
+│         Prune nodes below DARKNESS_THRESHOLD (0.1)
 │
-├── 3. router.update(graph, active_nodes)
+├── 3. router.update(graph, active_nodes, text=user_input)
+│         detect_domain_from_text(text) — keyword-based domain probe
 │         signal = encode_graph_to_signal(graph, active_nodes)
 │         state  = state × DECAY_RATE + signal × UPDATE_RATE
 │         turn_count += 1
-│         current_domain = get_domain()
+│         current_domain = get_domain()   (threshold > 0.01)
 │
 ├── 4. retriever.retrieve_all(graph, router, ...)
 │         active_dims = top-20 dims from router.state
 │         patterns    = Jaccard similarity scan of Redis patterns
-│         domain_kn   = Redis key: brain:lfm:domain:{domain}:knowledge
-│         gaps        = domain_kn.common_gaps − active graph nodes
-│         contradictions = domain_kn.common_contradictions ∩ graph
-│         return {patterns, domain_knowledge, gaps, contradictions}
+│         gaps        = domain seed common_gaps − active graph nodes
+│         contradictions = seed common_contradictions ∩ graph
 │
-├── 5. prompt_builder.build(...)
-│         Assemble sections in priority order
-│         Cut to PROMPT_MAX_TOKENS budget from lowest priority up
+├── 5. prompt_builder.build(...)  ← REWRITTEN (Bug 1 fix)
+│         ── PROTECTED BLOCK (guaranteed to reach model) ──
+│         session_header + universal_adaptive_block(turn_N)
+│         + decisions_section + compressed_history + current_request
+│         Cost: ~15 tok/turn for history (was ~300 tok/turn)
 │
-├── 6. llm(prompt, max_tokens, temperature, ...)
-│         Local GGUF inference via llama-cpp-python
+│         ── OPTIONAL BLOCK (trimmed to fit budget) ──
+│         active_context + gaps_section
 │
-├── 7. graph.ingest(response_text, turn_N)   ← learn from response
-│         (does NOT increment turn_count — router already did)
+├── 6. inference_config.format_prompt(plugin.system_prompt, prompt, "")
+│         ChatML format: <|im_start|>system ... <|im_end|>
+│         Note: passes "" not user_input (Bug 2 fix — no double injection)
 │
-├── 8. if confidence > threshold:
+├── 7. cloud_client.generate(prompt, decision, max_tokens)
+│         _cloudflare_coding() → POST {"prompt": "<ChatML>", ...}
+│         Response parsed from "text" key
+│
+├── 8. graph.ingest(response_text, turn_N)  ← learn from response
+│
+├── 9. if confidence > threshold:
 │         retriever.store_pattern(active_dims, next_concepts, domain)
 │
-└── 9. memory.save_session(...)
+└── 10. memory.save_session(...)
           Redis pipeline: serialize graph + router + history + metrics
 ```
 
@@ -323,50 +347,56 @@ These surfaces in the prompt as `[GAPS DETECTED]` and `[CONTRADICTIONS DETECTED]
 
 **Purpose:** Assembles the LLM prompt from all available context signals within a hard token budget.
 
-#### Section Priority (highest to lowest)
+**Current version:** v0.3 (full rewrite — Bug 1 fix)
+
+#### Two-block assembly model
 
 ```
-1. System Prompt           — NEVER cut
-2. Session Context         — NEVER cut (domain, confidence, turn number)
-3. Established Decisions   — NEVER cut (final architectural choices)
-4. Current Request         — NEVER cut (the user's actual question)
-5. Active Graph Context    — cut if over budget (first section to trim)
-6. Gaps & Contradictions   — cut second
-7. Recent History          — cut last
+── PROTECTED BLOCK (assembled first, never truncated) ─────────────────
+session_header       — domain, turn number, confidence
+universal_block      — expert identity + domain detection guide + 5 rules
+decisions_section    — graph nodes where is_decision=True and darkness>0.5
+compressed_history   — last N turns at ~15 tokens/turn (was ~300 tok/turn)
+current_request      — the user's actual question
+
+── OPTIONAL BLOCK (trimmed to fit remaining budget) ───────────────────
+active_context       — graph concepts, relationships, recent progress
+gaps_section         — domain gaps and contradictions
 ```
 
-Cutting is done by character-level slicing (`section[:available * 4]`), not whole-section removal where possible.
+**Why this matters:** The old ordering put history LAST. By turn 4, each assistant response was ~300 tokens. The budget was exhausted before history was appended — the model had no memory of prior turns and rewrote everything from scratch. Compressed history (~15 tokens/turn) means 10 turns costs 150 tokens total.
 
-#### System Prompt (v0.2)
+#### Universal Adaptive Block
 
-The system prompt was rewritten in Optimisation Pass 1 to include explicit incremental build rules:
+`_build_universal_adaptive_block(turn_number)` fires every single turn, bypassing the plugin layer entirely. It gives the model:
 
-```
-SESSION RULES:
-1. INCREMENTAL BUILD: Do NOT rewrite established code. Output only NEW code.
-2. HONOUR DECISIONS: [ESTABLISHED DECISIONS] are final.
-3. PRECISION: If adding a method, emit only that method.
-4. NO QUESTIONS: Infer from context.
-5. CODE ONLY: No preamble or meta-commentary.
-```
+1. A domain detection guide (20 domain categories from Java to Creative Writing)
+2. 5 universal rules: incremental only, honour decisions, quality floor by domain, no preamble, no questions
+
+This is why consistency = 3.00/3.00 across all three enterprise suites.
+
+#### Decisions are owned exclusively by PromptBuilder
+
+`_build_decisions_section(graph)` emits `[ESTABLISHED DECISIONS]`. This section was also emitted by `graph.get_context_summary()` — Bug 3 fix removed it from the graph side. `get_context_summary()` now only emits `[ACTIVE CONCEPTS]`, `[RELATIONSHIPS]`, `[RECENT PROGRESS]`.
 
 #### Token Budget Enforcement
 
 ```python
-available = PROMPT_MAX_TOKENS - base_tokens
-# base_tokens = system + session + decisions + request (never cut)
+remaining = get_token_budget(domain) - estimate_tokens(protected)
+optional  = active_context + gaps_section
 
-for section in [active_context, gaps_contradictions, history]:
-    section_tokens = estimate(section)
-    if section_tokens <= available:
-        prompt += section
-        available -= section_tokens
-    else:
-        prompt += section[:available * 4]   # char-level trim
-        break
+if estimate_tokens(optional) <= remaining:
+    body = optional
+else:
+    body = optional[:remaining * 4]   # char-level trim
+
+return protected + body
 ```
 
-The `PROMPT_MAX_TOKENS` cap (3500 in v0.2, was 2800 in v0.1) is where the quality/compression tradeoff lives.
+Domain token budgets (from `AppConfig.TOKEN_BUDGETS`):
+- `default`: 2800
+- `java_spring`, `spring_boot`, `spring_security`, `spring_jdbc`: 3500
+- `sap`: 4000
 
 ---
 
@@ -450,17 +480,34 @@ Three domains ship by default: `spring_jdbc`, `spring_boot`, `spring_security`.
 
 ### tests/quality/scorer.py
 
-**Purpose:** Evaluates code quality of Brain responses on a 0–11 rubric.
+**Purpose:** Evaluates Java/Spring Boot code quality on a 0–11 rubric.
 
-| Dimension | Max Score | How Measured |
-|-----------|----------:|--------------|
-| Compilability | 1 | Balanced braces + class keyword present |
-| Correctness | 3 | Required keywords from `dao_suite.json` present |
-| Consistency | 3 | Established decisions not overridden |
-| Completeness | 2 | Edge cases: Optional, null checks, exception handling |
-| Convention | 2 | Spring conventions: correct annotations, naming |
+| Dimension | Max | How Measured |
+|-----------|----:|--------------|
+| Compilability | 1.0 | Balanced `{}`, `public class` has closing brace; strips markdown fences before analysis |
+| Correctness   | 3.0 | `required_keywords` from benchmark turn config, weighted |
+| Consistency   | 3.0 | Penalises `@Autowired` field injection, wrong JDBC type |
+| Completeness  | 2.0 | Error handling: `DataAccessException`, `@Transactional`, `EmptyResultDataAccessException`; edge cases: `orElseThrow`, `Optional.ofNullable`, `UserNotFoundException` |
+| Convention    | 2.0 | Exception layer (+1.0), validation (`@Valid`, `@NotBlank`) (+0.5), REST responses (`ResponseEntity`) (+0.5) |
 
-Each turn in `dao_suite.json` carries a `quality_config.required_keywords` dict that the scorer uses for its Correctness check.
+### tests/quality/generic_scorer.py  *(new)*
+
+**Purpose:** Language-agnostic scorer for non-Java suites. Same 11-point breakdown.
+
+| Language | Completeness patterns | Convention patterns |
+|---|---|---|
+| `python` | `IntegrityError`, `NoResultFound`, `SQLAlchemyError`, `HTTPException`, `async with`, HTTP status codes | `async def`, `await`, `Depends(`, type hints `-> `, `db.rollback()`, `Field(` |
+| `go`     | `if err != nil`, `pgx.ErrNoRows`, `defer `, `rows.Close()`, `tx.Rollback`, HTTP status consts | `ctx context.Context`, `interface {`, `func (`, `pgx.BeginTx(`, `defer tx.Rollback`, `json:"` |
+| `generic`| `error`, `exception`, `null`, `nil`, `catch`, `try` | `function`, `return`, `const`, `interface` |
+
+Compilability for Python checks that every `def`/`class`/`async def` block has an indented body. Compilability for Go checks balanced `{}`.
+
+Run enterprise suites with:
+```bash
+PYTHONPATH=$PWD python3 benchmarks/enterprise_runner.py --suite python
+PYTHONPATH=$PWD python3 benchmarks/enterprise_runner.py --suite go
+PYTHONPATH=$PWD python3 benchmarks/enterprise_runner.py --all
+```
 
 ---
 
@@ -491,30 +538,80 @@ def _concept_present(concept, response_lemmas, response_lower):
 
 ### benchmarks/runner.py
 
-**Purpose:** Head-to-head benchmark. Loads one shared `Llama` instance, runs the baseline (full appended history), then runs the Brain, saves both to CSV, and prints a comparison table.
-
-#### Baseline Strategy
-
-```python
-prompt = system_prompt + history + user_input
-history += f"[ASSISTANT]\n{response}\n"
-```
-
-History grows unboundedly. When the total prompt + request exceeds 8192 tokens, a truncation guard kicks in (trims to last 3 exchanges and retries).
+**Purpose:** Single-suite Brain-only benchmark. Baseline was local-GGUF only and is skipped in cloud mode.
 
 #### Brain Strategy
 
-Uses `Brain.think()` directly — graph + router + retriever + budget-enforced prompt.
+`run_brain(suite)` uses `Brain.process(turn["input"])` directly. `Brain.process()` is a wrapper around `Brain.think()`. Metrics are read from `brain.last_prompt_tokens`, `brain.last_graph_ms`, `brain.last_retrieval_ms`.
 
 #### Output
 
-Two CSVs written to `data/results/`:
-- `baseline/dao_suite.csv` — per-turn: turn, prompt_tokens, response_tokens, tps, response
-- `brain/dao_suite.csv` — per-turn: all baseline fields + quality, coherence, graph_nodes, domain, gaps
+CSV written to `data/results/brain/dao_suite.csv`.
+
+Run:
+```bash
+PYTHONPATH=$PWD python3 benchmarks/runner.py
+```
+
+### benchmarks/enterprise_runner.py  *(new)*
+
+**Purpose:** Multi-suite enterprise runner that can run all three language suites and print a cross-suite comparison.
+
+#### Benchmark suites
+
+| Key | File | Language | Description |
+|---|---|---|---|
+| `java` | `dao_suite.json` | Java | Original Spring Boot DAO, 10 turns |
+| `python` | `python_inventory_suite.json` | Python | FastAPI + async SQLAlchemy inventory system, 10 turns |
+| `go` | `go_ledger_suite.json` | Go | Financial ledger API with pgx/v5 + chi, 10 turns |
+
+Each turn in the JSON carries:
+```json
+{
+  "number": 3,
+  "input": "...",
+  "quality_config": {
+    "language": "python",
+    "required_keywords": {"keyword": weight, ...}
+  }
+}
+```
+
+The runner selects `SpringBootQualityScorer` for Java and `GenericCodeQualityScorer(language)` for all others.
 
 ---
 
-## Optimisation Pass 1 — Quality
+## Optimisation Pass 3 — Cloud Migration + Prompt Architecture
+
+These changes were applied on **February 26–28, 2026** and represent the current production state.
+
+### Cloud migration (Feb 26)
+
+| Change | Effect |
+|---|---|
+| Removed `from llama_cpp import Llama` entirely | No local model instantiation |
+| `self.llm = None` always | All inference routes to Cloudflare |
+| `inference_config = MODEL_REGISTRY["qwen2.5-coder-32b"]` hardcoded | ChatML format always used |
+| `_cloudflare_coding()` switched from `messages` to `prompt` field | Worker was silently ignoring `messages` — quality was 4.05 |
+| Response parsed from `"text"` key | Worker response shape: `{ok, model, prompt, text, raw}` |
+
+**Quality: 4.05 → 9.60/11** from the `messages→prompt` fix alone.
+
+### 5-bug fix (Feb 28)
+
+| Bug | File | Fix | Effect |
+|---|---|---|---|
+| History always truncated + no universal domain support | `brain/prompt.py` | Full rewrite: protected block, compressed history, universal adaptive block | Context preserved every turn; any domain works |
+| `user_input` injected twice | `brain/brain.py` | Pass `""` not `user_input` to `format_prompt()` | Removes duplicate request tokens |
+| Decisions emitted twice | `brain/graph.py` | Remove decisions block from `get_context_summary()` | Single authoritative decisions section |
+| Missing Bean Validation mandates | `brain/plugins/java_spring.py` | Added `@Valid`, `@NotBlank`, `@Email`, `@Size`, `@Transactional` rules | Turn 9 quality: 6.5 → 11.0 |
+| Plugin personas too thin | `brain/plugins/general.py`, `sap.py` | Session rules + domain standards | Consistent incremental behaviour |
+
+**Java quality: 9.60 → 9.75/11 | Perfect turns: 2 → 5 | Avg prompt tokens: 1,838 → 1,712**
+
+---
+
+## Optimisation Pass 1 — Quality (historical)
 
 These changes improved **brain avg quality from 5.4 → 6.5/11** and **coherence from 0.51 → 0.79**.
 
@@ -552,9 +649,9 @@ These changes improved **brain avg quality from 5.4 → 6.5/11** and **coherence
 
 ---
 
-## Optimisation Pass 2 — CPU Throughput
+## Optimisation Pass 2 — CPU Throughput (historical, local model only)
 
-These changes improved **baseline avg TPS from 1.8 → 2.3** (+28%) and **brain avg TPS from 0.9 → 1.1** (+22%) without any code logic change.
+These changes improved **baseline avg TPS from 1.8 → 2.3** (+28%) and **brain avg TPS from 0.9 → 1.1** (+22%) without any code logic change. Not applicable in cloud-only mode — included for reference if local inference is re-enabled.
 
 ### 1. `n_batch=512`
 
@@ -603,8 +700,11 @@ These changes improved **baseline avg TPS from 1.8 → 2.3** (+28%) and **brain 
 | `GRAPH_DARKNESS_INCREMENT` | `0.3` | How much a mention brightens a node |
 | `ROUTER_DECAY_RATE` | `0.9` | State vector decay — lower = shorter memory |
 | `ROUTER_UPDATE_RATE` | `0.1` | Weight of new signal — must sum to ≤ 1.0 with decay |
-| `BRAIN_MAX_HISTORY_TURNS` | `5` | Raw conversation turns kept in prompt history |
-| `GRAPH_MAX_CONTEXT_TOKENS` | `500` | Token budget for graph summary section |
+| `BRAIN_MAX_HISTORY_TURNS` | `3` | Turns kept in compressed history block (~15 tok/turn each) |
+| `GRAPH_MAX_CONTEXT_TOKENS` | `800` | Token budget for graph summary section (was 300) |
+| `RETRIEVER_SIMILARITY_THRESHOLD` | `0.3` | Jaccard threshold for pattern retrieval (was 0.7) |
+| `RETRIEVER_MIN_PATTERN_FREQUENCY` | `1` | Minimum pattern hits before retrieval (was 2) |
+| `CLOUDFLARE_WORKER_URL` | *(set in .env)* | Inference endpoint — if set, all routing goes to Cloudflare |
 
 ---
 
